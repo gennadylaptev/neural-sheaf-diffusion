@@ -2,27 +2,37 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import torch
-import lib.laplace as lap
+import nsd.lib.laplace as lap
 
 from torch import nn
 from torch_scatter import scatter_add
 from torch_geometric.utils import degree
-from models.orthogonal import Orthogonal
+from nsd.models.orthogonal import Orthogonal
 
 
 class LaplacianBuilder(nn.Module):
-
-    def __init__(self, size, edge_index, d, normalised=False, deg_normalised=False, add_hp=False, add_lp=False,
-                 augmented=True):
+    def __init__(
+        self,
+        size,
+        edge_index,
+        d,
+        normalised=False,
+        deg_normalised=False,
+        add_hp=False,
+        add_lp=False,
+        augmented=True,
+    ):
         super(LaplacianBuilder, self).__init__()
         assert not (normalised and deg_normalised)
 
         self.d = d
         self.final_d = d
+
         if add_hp:
             self.final_d += 1
         if add_lp:
             self.final_d += 1
+
         self.size = size
         self.edges = edge_index.size(1) // 2
         self.edge_index = edge_index
@@ -34,11 +44,23 @@ class LaplacianBuilder(nn.Module):
         self.augmented = augmented
 
         # Preprocess the sparse indices required to compute the Sheaf Laplacian.
+
+        # mapping of edges corresponding to the same pair of nodes (with "mirrored" edge pairs)
         self.full_left_right_idx, _ = lap.compute_left_right_map_index(edge_index, full_matrix=True)
+
+        # unique mapping of edges corresponding to the same pair of nodes
+        # mapping of node idx to each edge in `self.left_right_idx``
         self.left_right_idx, self.vertex_tril_idx = lap.compute_left_right_map_index(edge_index)
+
         if self.add_lp or self.add_hp:
-            self.fixed_diag_indices, self.fixed_tril_indices = lap.compute_fixed_diag_laplacian_indices(
-                size, self.vertex_tril_idx, self.d, self.final_d)
+            (
+                self.fixed_diag_indices,
+                self.fixed_tril_indices,
+            ) = lap.compute_fixed_diag_laplacian_indices(
+                size, self.vertex_tril_idx, self.d, self.final_d
+            )
+
+        # compute degree matrix
         self.deg = degree(self.edge_index[0], num_nodes=self.size)
 
     def get_fixed_maps(self, size, dtype):
@@ -70,13 +92,17 @@ class LaplacianBuilder(nn.Module):
             diag_sqrt_inv = (diag + 1).pow(-0.5)
         else:
             diag_sqrt_inv = diag.pow(-0.5)
-            diag_sqrt_inv.masked_fill_(diag_sqrt_inv == float('inf'), 0)
-        diag_sqrt_inv = diag_sqrt_inv.view(-1, 1, 1) if tril.dim() > 2 else diag_sqrt_inv.view(-1, d)
+            diag_sqrt_inv.masked_fill_(diag_sqrt_inv == float("inf"), 0)
+        diag_sqrt_inv = (
+            diag_sqrt_inv.view(-1, 1, 1) if tril.dim() > 2 else diag_sqrt_inv.view(-1, d)
+        )
         left_norm = diag_sqrt_inv[row]
         right_norm = diag_sqrt_inv[col]
         non_diag_maps = left_norm * tril * right_norm
 
-        diag_sqrt_inv = diag_sqrt_inv.view(-1, 1, 1) if diag.dim() > 2 else diag_sqrt_inv.view(-1, d)
+        diag_sqrt_inv = (
+            diag_sqrt_inv.view(-1, 1, 1) if diag.dim() > 2 else diag_sqrt_inv.view(-1, d)
+        )
         diag_maps = diag_sqrt_inv**2 * diag
 
         return diag_maps, non_diag_maps
@@ -90,20 +116,32 @@ class LaplacianBuilder(nn.Module):
 
         # Normalise the fixed parts.
         if self.normalised:
-            fixed_diag, fixed_non_diag = self.scalar_normalise(fixed_diag, fixed_non_diag, tril_row, tril_col)
+            fixed_diag, fixed_non_diag = self.scalar_normalise(
+                fixed_diag, fixed_non_diag, tril_row, tril_col
+            )
         fixed_diag, fixed_non_diag = fixed_diag.view(-1), fixed_non_diag.view(-1)
         # Combine the learnable and fixed parts.
-        tril_indices, tril_maps = lap.mergesp(self.fixed_tril_indices, fixed_non_diag, tril_indices, tril_maps)
-        diag_indices, diag_maps = lap.mergesp(self.fixed_diag_indices, fixed_diag, diag_indices, diag_maps)
+        tril_indices, tril_maps = lap.mergesp(
+            self.fixed_tril_indices, fixed_non_diag, tril_indices, tril_maps
+        )
+        diag_indices, diag_maps = lap.mergesp(
+            self.fixed_diag_indices, fixed_diag, diag_indices, diag_maps
+        )
 
         return (diag_indices, diag_maps), (tril_indices, tril_maps)
 
     def create_with_new_edge_index(self, edge_index):
         assert edge_index.max() <= self.size
         new_builder = self.__class__(
-            self.size, edge_index, self.d,
-            normalised=self.normalised, deg_normalised=self.deg_normalised, add_hp=self.add_hp, add_lp=self.add_lp,
-            augmented=self.augmented)
+            self.size,
+            edge_index,
+            self.d,
+            normalised=self.normalised,
+            deg_normalised=self.deg_normalised,
+            add_hp=self.add_hp,
+            add_lp=self.add_lp,
+            augmented=self.augmented,
+        )
         new_builder.train(self.training)
         return new_builder
 
@@ -111,13 +149,24 @@ class LaplacianBuilder(nn.Module):
 class DiagLaplacianBuilder(LaplacianBuilder):
     """Learns a a Sheaf Laplacian with diagonal restriction maps"""
 
-    def __init__(self, size, edge_index, d, normalised=False, deg_normalised=False, add_hp=False, add_lp=False,
-                 augmented=True):
+    def __init__(
+        self,
+        size,
+        edge_index,
+        d,
+        normalised=False,
+        deg_normalised=False,
+        add_hp=False,
+        add_lp=False,
+        augmented=True,
+    ):
         super(DiagLaplacianBuilder, self).__init__(
-            size, edge_index, d, normalised, deg_normalised, add_hp, add_lp, augmented)
+            size, edge_index, d, normalised, deg_normalised, add_hp, add_lp, augmented
+        )
 
         self.diag_indices, self.tril_indices = lap.compute_learnable_diag_laplacian_indices(
-            size, self.vertex_tril_idx, self.d, self.final_d)
+            size, self.vertex_tril_idx, self.d, self.final_d
+        )
 
     def normalise(self, diag, tril, row, col):
         if self.normalised:
@@ -128,10 +177,11 @@ class DiagLaplacianBuilder(LaplacianBuilder):
         elif self.deg_normalised:
             deg_sqrt_inv = (self.deg + 1).pow(-0.5) if self.augmented else self.deg.pow(-0.5)
             deg_sqrt_inv = deg_sqrt_inv.unsqueeze(-1)
-            deg_sqrt_inv.masked_fill_(deg_sqrt_inv == float('inf'), 0)
+            deg_sqrt_inv.masked_fill_(deg_sqrt_inv == float("inf"), 0)
             left_norm, right_norm = deg_sqrt_inv[row], deg_sqrt_inv[col]
             tril = left_norm * tril * right_norm
             diag = deg_sqrt_inv * diag * deg_sqrt_inv
+
         return diag, tril
 
     def forward(self, maps):
@@ -155,15 +205,20 @@ class DiagLaplacianBuilder(LaplacianBuilder):
 
         # Append fixed diagonal values in the non-learnable dimensions.
         (diag_indices, diag_maps), (tril_indices, tril_maps) = self.append_fixed_maps(
-            len(left_maps), diag_indices, diag_maps, tril_indices, tril_maps)
+            len(left_maps), diag_indices, diag_maps, tril_indices, tril_maps
+        )
 
         # Add the upper triangular part
         triu_indices = torch.empty_like(tril_indices)
         triu_indices[0], triu_indices[1] = tril_indices[1], tril_indices[0]
-        non_diag_indices, non_diag_values = lap.mergesp(tril_indices, tril_maps, triu_indices, tril_maps)
+        non_diag_indices, non_diag_values = lap.mergesp(
+            tril_indices, tril_maps, triu_indices, tril_maps
+        )
 
         # Merge diagonal and non-diagonal
-        edge_index, weights = lap.mergesp(non_diag_indices, non_diag_values, diag_indices, diag_maps)
+        edge_index, weights = lap.mergesp(
+            non_diag_indices, non_diag_values, diag_indices, diag_maps
+        )
 
         return (edge_index, weights), saved_tril_maps
 
@@ -171,22 +226,33 @@ class DiagLaplacianBuilder(LaplacianBuilder):
 class NormConnectionLaplacianBuilder(LaplacianBuilder):
     """Learns a a Sheaf Laplacian with diagonal restriction maps"""
 
-    def __init__(self, size, edge_index, d, add_hp=False, add_lp=False, orth_map=None, augmented=True):
+    def __init__(
+        self, size, edge_index, d, add_hp=False, add_lp=False, orth_map=None, augmented=True
+    ):
         super(NormConnectionLaplacianBuilder, self).__init__(
-            size, edge_index, d, add_hp=add_hp, add_lp=add_lp, normalised=True, augmented=augmented)
+            size, edge_index, d, add_hp=add_hp, add_lp=add_lp, normalised=True, augmented=augmented
+        )
         self.orth_transform = Orthogonal(d=self.d, orthogonal_map=orth_map)
         self.orth_map = orth_map
 
         _, self.tril_indices = lap.compute_learnable_laplacian_indices(
-            size, self.vertex_tril_idx, self.d, self.final_d)
+            size, self.vertex_tril_idx, self.d, self.final_d
+        )
         self.diag_indices, _ = lap.compute_learnable_diag_laplacian_indices(
-            size, self.vertex_tril_idx, self.d, self.final_d)
+            size, self.vertex_tril_idx, self.d, self.final_d
+        )
 
     def create_with_new_edge_index(self, edge_index):
         assert edge_index.max() <= self.size
         new_builder = self.__class__(
-            self.size, edge_index, self.d, add_hp=self.add_hp, add_lp=self.add_lp, augmented=self.augmented,
-            orth_map=self.orth_map)
+            self.size,
+            edge_index,
+            self.d,
+            add_hp=self.add_hp,
+            add_lp=self.add_lp,
+            augmented=self.augmented,
+            orth_map=self.orth_map,
+        )
         new_builder.train(self.training)
         return new_builder
 
@@ -200,13 +266,17 @@ class NormConnectionLaplacianBuilder(LaplacianBuilder):
             diag_sqrt_inv = (diag + 1).pow(-0.5)
         else:
             diag_sqrt_inv = diag.pow(-0.5)
-            diag_sqrt_inv.masked_fill_(diag_sqrt_inv == float('inf'), 0)
-        diag_sqrt_inv = diag_sqrt_inv.view(-1, 1, 1) if tril.dim() > 2 else diag_sqrt_inv.view(-1, d)
+            diag_sqrt_inv.masked_fill_(diag_sqrt_inv == float("inf"), 0)
+        diag_sqrt_inv = (
+            diag_sqrt_inv.view(-1, 1, 1) if tril.dim() > 2 else diag_sqrt_inv.view(-1, d)
+        )
         left_norm = diag_sqrt_inv[row]
         right_norm = diag_sqrt_inv[col]
         non_diag_maps = left_norm * tril * right_norm
 
-        diag_sqrt_inv = diag_sqrt_inv.view(-1, 1, 1) if diag.dim() > 2 else diag_sqrt_inv.view(-1, d)
+        diag_sqrt_inv = (
+            diag_sqrt_inv.view(-1, 1, 1) if diag.dim() > 2 else diag_sqrt_inv.view(-1, d)
+        )
         diag_maps = diag_sqrt_inv**2 * diag
 
         return diag_maps, non_diag_maps
@@ -215,6 +285,7 @@ class NormConnectionLaplacianBuilder(LaplacianBuilder):
         if edge_weights is not None:
             assert edge_weights.size(1) == 1
         assert len(map_params.size()) == 2
+
         if self.orth_map in ["matrix_exp", "cayley"]:
             assert map_params.size(1) == self.d * (self.d + 1) // 2
         else:
@@ -231,7 +302,7 @@ class NormConnectionLaplacianBuilder(LaplacianBuilder):
         if edge_weights is None:
             diag_maps = self.deg.unsqueeze(-1)
         else:
-            diag_maps = scatter_add(edge_weights ** 2, row, dim=0, dim_size=self.size)
+            diag_maps = scatter_add(edge_weights**2, row, dim=0, dim_size=self.size)
             maps = maps * edge_weights.unsqueeze(-1)
 
         # Compute the transport maps.
@@ -246,31 +317,56 @@ class NormConnectionLaplacianBuilder(LaplacianBuilder):
 
         # Append fixed diagonal values in the non-learnable dimensions.
         (diag_indices, diag_maps), (tril_indices, tril_maps) = self.append_fixed_maps(
-            len(left_maps), diag_indices, diag_maps, tril_indices, tril_maps)
+            len(left_maps), diag_indices, diag_maps, tril_indices, tril_maps
+        )
 
         # Add the upper triangular part
         triu_indices = torch.empty_like(tril_indices)
         triu_indices[0], triu_indices[1] = tril_indices[1], tril_indices[0]
-        non_diag_indices, non_diag_values = lap.mergesp(tril_indices, tril_maps, triu_indices, tril_maps)
+        non_diag_indices, non_diag_values = lap.mergesp(
+            tril_indices, tril_maps, triu_indices, tril_maps
+        )
 
         # Merge diagonal and non-diagonal
-        edge_index, weights = lap.mergesp(non_diag_indices, non_diag_values, diag_indices, diag_maps)
+        edge_index, weights = lap.mergesp(
+            non_diag_indices, non_diag_values, diag_indices, diag_maps
+        )
 
         return (edge_index, weights), saved_tril_maps
 
 
 class GeneralLaplacianBuilder(LaplacianBuilder):
-    """Learns a multi-dimensional Sheaf Laplacian from data."""
+    """Learns a multi-dimensional Sheaf Laplacian from data.
+    (Stores an original graph size and an original edge_index)
+    """
 
-    def __init__(self, size, edge_index, d, normalised=False, deg_normalised=False,
-                 add_hp=False, add_lp=False, augmented=True):
-        super(GeneralLaplacianBuilder, self).__init__(size, edge_index, d,
-                                                      normalised=normalised, deg_normalised=deg_normalised,
-                                                      add_hp=add_hp, add_lp=add_lp, augmented=augmented)
+    def __init__(
+        self,
+        size,  # graph size
+        edge_index,
+        d,
+        normalised=False,
+        deg_normalised=False,
+        add_hp=False,
+        add_lp=False,
+        augmented=True,  # add I to D
+    ):
+        super(GeneralLaplacianBuilder, self).__init__(
+            size,
+            edge_index,
+            d,
+            normalised=normalised,
+            deg_normalised=deg_normalised,
+            add_hp=add_hp,
+            add_lp=add_lp,
+            augmented=augmented,
+        )
 
         # Preprocess the sparse indices required to compute the Sheaf Laplacian.
+        # (diagonal and tril blocks indices)
         self.diag_indices, self.tril_indices = lap.compute_learnable_laplacian_indices(
-            size, self.vertex_tril_idx, self.d, self.final_d)
+            size, self.vertex_tril_idx, self.d, self.final_d
+        )
 
     def normalise(self, diag_maps, non_diag_maps, tril_row, tril_col):
         if self.normalised:
@@ -282,7 +378,9 @@ class GeneralLaplacianBuilder(LaplacianBuilder):
             else:
                 eps = torch.zeros(self.d, device=self.device)
 
-            to_be_inv_diag_maps = diag_maps + torch.diag(1. + eps).unsqueeze(0) if self.augmented else diag_maps
+            to_be_inv_diag_maps = (
+                diag_maps + torch.diag(1.0 + eps).unsqueeze(0) if self.augmented else diag_maps
+            )
             d_sqrt_inv = lap.batched_sym_matrix_pow(to_be_inv_diag_maps, -0.5)
             assert torch.all(torch.isfinite(d_sqrt_inv))
             left_norm = d_sqrt_inv[tril_row]
@@ -293,7 +391,11 @@ class GeneralLaplacianBuilder(LaplacianBuilder):
             assert torch.all(torch.isfinite(diag_maps))
         elif self.deg_normalised:
             # These are general d x d maps so we need to divide by 1 / sqrt(deg * d), their maximum possible norm.
-            deg_sqrt_inv = (self.deg * self.d + 1).pow(-1/2) if self.augmented else (self.deg * self.d + 1).pow(-1/2)
+            deg_sqrt_inv = (
+                (self.deg * self.d + 1).pow(-1 / 2)
+                if self.augmented
+                else (self.deg * self.d + 1).pow(-1 / 2)
+            )
             deg_sqrt_inv = deg_sqrt_inv.view(-1, 1, 1)
             left_norm = deg_sqrt_inv[tril_row]
             right_norm = deg_sqrt_inv[tril_col]
@@ -302,17 +404,27 @@ class GeneralLaplacianBuilder(LaplacianBuilder):
         return diag_maps, non_diag_maps
 
     def forward(self, maps):
+        # left and right edge indices
         left_idx, right_idx = self.left_right_idx
+
+        # vertex idx for each edge
         tril_row, tril_col = self.vertex_tril_idx
+
+        # block indices
         tril_indices, diag_indices = self.tril_indices, self.diag_indices
         row, _ = self.edge_index
 
         # Compute transport maps.
         assert torch.all(torch.isfinite(maps))
+        # select operator matrices for each edge idx
         left_maps = torch.index_select(maps, index=left_idx, dim=0)
         right_maps = torch.index_select(maps, index=right_idx, dim=0)
+
+        # compute tril maps by mm each left matrix w/ corresponding right
         tril_maps = -torch.bmm(torch.transpose(left_maps, dim0=-1, dim1=-2), right_maps)
+        # save tril maps
         saved_tril_maps = tril_maps.detach().clone()
+
         diag_maps = torch.bmm(torch.transpose(maps, dim0=-1, dim1=-2), maps)
         diag_maps = scatter_add(diag_maps, row, dim=0, dim_size=self.size)
 
@@ -322,15 +434,19 @@ class GeneralLaplacianBuilder(LaplacianBuilder):
 
         # Append fixed diagonal values in the non-learnable dimensions.
         (diag_indices, diag_maps), (tril_indices, tril_maps) = self.append_fixed_maps(
-            len(left_maps), diag_indices, diag_maps, tril_indices, tril_maps)
+            len(left_maps), diag_indices, diag_maps, tril_indices, tril_maps
+        )
 
         # Add the upper triangular part.
         triu_indices = torch.empty_like(tril_indices)
         triu_indices[0], triu_indices[1] = tril_indices[1], tril_indices[0]
-        non_diag_indices, non_diag_values = lap.mergesp(tril_indices, tril_maps, triu_indices, tril_maps)
+        non_diag_indices, non_diag_values = lap.mergesp(
+            tril_indices, tril_maps, triu_indices, tril_maps
+        )
 
         # Merge diagonal and non-diagonal
-        edge_index, weights = lap.mergesp(non_diag_indices, non_diag_values, diag_indices, diag_maps)
+        edge_index, weights = lap.mergesp(
+            non_diag_indices, non_diag_values, diag_indices, diag_maps
+        )
 
         return (edge_index, weights), saved_tril_maps
-

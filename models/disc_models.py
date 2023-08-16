@@ -6,16 +6,19 @@ import torch.nn.functional as F
 import torch_sparse
 
 from torch import nn
-from models.sheaf_base import SheafDiffusion
-from models import laplacian_builders as lb
-from models.sheaf_models import LocalConcatSheafLearner, EdgeWeightLearner, LocalConcatSheafLearnerVariant
+from nsd.models.sheaf_base import SheafDiffusion
+from nsd.models import laplacian_builders as lb
+from nsd.models.sheaf_models import (
+    LocalConcatSheafLearner,
+    EdgeWeightLearner,
+    LocalConcatSheafLearnerVariant,
+)
 
 
 class DiscreteDiagSheafDiffusion(SheafDiffusion):
-
     def __init__(self, edge_index, args):
         super(DiscreteDiagSheafDiffusion, self).__init__(edge_index, args)
-        assert args['d'] > 0
+        assert args["d"] > 0
 
         self.lin_right_weights = nn.ModuleList()
         self.lin_left_weights = nn.ModuleList()
@@ -23,7 +26,9 @@ class DiscreteDiagSheafDiffusion(SheafDiffusion):
         self.batch_norms = nn.ModuleList()
         if self.right_weights:
             for i in range(self.layers):
-                self.lin_right_weights.append(nn.Linear(self.hidden_channels, self.hidden_channels, bias=False))
+                self.lin_right_weights.append(
+                    nn.Linear(self.hidden_channels, self.hidden_channels, bias=False)
+                )
                 nn.init.orthogonal_(self.lin_right_weights[-1].weight.data)
         if self.left_weights:
             for i in range(self.layers):
@@ -35,15 +40,29 @@ class DiscreteDiagSheafDiffusion(SheafDiffusion):
         num_sheaf_learners = min(self.layers, self.layers if self.nonlinear else 1)
         for i in range(num_sheaf_learners):
             if self.sparse_learner:
-                self.sheaf_learners.append(LocalConcatSheafLearnerVariant(self.final_d,
-                    self.hidden_channels, out_shape=(self.d,), sheaf_act=self.sheaf_act))
+                self.sheaf_learners.append(
+                    LocalConcatSheafLearnerVariant(
+                        self.final_d,
+                        self.hidden_channels,
+                        out_shape=(self.d,),
+                        sheaf_act=self.sheaf_act,
+                    )
+                )
             else:
-                self.sheaf_learners.append(LocalConcatSheafLearner(
-                    self.hidden_dim, out_shape=(self.d,), sheaf_act=self.sheaf_act))
-        self.laplacian_builder = lb.DiagLaplacianBuilder(self.graph_size, edge_index, d=self.d,
-                                                         normalised=self.normalised,
-                                                         deg_normalised=self.deg_normalised,
-                                                         add_hp=self.add_hp, add_lp=self.add_lp)
+                self.sheaf_learners.append(
+                    LocalConcatSheafLearner(
+                        self.hidden_dim, out_shape=(self.d,), sheaf_act=self.sheaf_act
+                    )
+                )
+        self.laplacian_builder = lb.DiagLaplacianBuilder(
+            self.graph_size,
+            edge_index,
+            d=self.d,
+            normalised=self.normalised,
+            deg_normalised=self.deg_normalised,
+            add_hp=self.add_hp,
+            add_lp=self.add_lp,
+        )
 
         self.epsilons = nn.ParameterList()
         for i in range(self.layers):
@@ -52,9 +71,12 @@ class DiscreteDiagSheafDiffusion(SheafDiffusion):
         self.lin1 = nn.Linear(self.input_dim, self.hidden_dim)
         if self.second_linear:
             self.lin12 = nn.Linear(self.hidden_dim, self.hidden_dim)
-        self.lin2 = nn.Linear(self.hidden_dim, self.output_dim)
+        self.lin2 = nn.Linear(self.hidden_dim * self.graph_size, self.inter_dim)
+        self.final_lin = nn.Linear(self.inter_dim, self.output_dim)
 
-    def forward(self, x):
+    def forward(self, data):
+        x = data.x
+
         x = F.dropout(x, p=self.input_dropout, training=self.training)
         x = self.lin1(x)
         if self.use_act:
@@ -67,8 +89,10 @@ class DiscreteDiagSheafDiffusion(SheafDiffusion):
         x0 = x
         for layer in range(self.layers):
             if layer == 0 or self.nonlinear:
-                x_maps = F.dropout(x, p=self.dropout if layer > 0 else 0., training=self.training)
-                maps = self.sheaf_learners[layer](x_maps.reshape(self.graph_size, -1), self.edge_index)
+                x_maps = F.dropout(x, p=self.dropout if layer > 0 else 0.0, training=self.training)
+                maps = self.sheaf_learners[layer](
+                    x_maps.reshape(self.graph_size, -1), self.edge_index
+                )
                 L, trans_maps = self.laplacian_builder(maps)
                 self.sheaf_learners[layer].set_L(trans_maps)
 
@@ -87,20 +111,27 @@ class DiscreteDiagSheafDiffusion(SheafDiffusion):
             if self.use_act:
                 x = F.elu(x)
 
-            coeff = (1 + torch.tanh(self.epsilons[layer]).tile(self.graph_size, 1))
+            coeff = 1 + torch.tanh(self.epsilons[layer]).tile(self.graph_size, 1)
             x0 = coeff * x0 - x
             x = x0
 
         x = x.reshape(self.graph_size, -1)
-        x = self.lin2(x)
-        return F.log_softmax(x, dim=1)
+
+        # concat node embeddings
+        x = x.reshape(x.size(0) // self.graph_size, -1)
+
+        # 2-layer clf head
+        x = self.lin2(F.elu(x))
+        x = self.final_lin(F.elu(x))
+
+        # return F.log_softmax(x, dim=1)
+        return x
 
 
 class DiscreteBundleSheafDiffusion(SheafDiffusion):
-
     def __init__(self, edge_index, args):
         super(DiscreteBundleSheafDiffusion, self).__init__(edge_index, args)
-        assert args['d'] > 1
+        assert args["d"] > 1
         assert not self.deg_normalised
 
         self.lin_right_weights = nn.ModuleList()
@@ -109,7 +140,9 @@ class DiscreteBundleSheafDiffusion(SheafDiffusion):
         self.batch_norms = nn.ModuleList()
         if self.right_weights:
             for i in range(self.layers):
-                self.lin_right_weights.append(nn.Linear(self.hidden_channels, self.hidden_channels, bias=False))
+                self.lin_right_weights.append(
+                    nn.Linear(self.hidden_channels, self.hidden_channels, bias=False)
+                )
                 nn.init.orthogonal_(self.lin_right_weights[-1].weight.data)
         if self.left_weights:
             for i in range(self.layers):
@@ -119,20 +152,38 @@ class DiscreteBundleSheafDiffusion(SheafDiffusion):
         self.sheaf_learners = nn.ModuleList()
         self.weight_learners = nn.ModuleList()
 
+        # construct sheaf learners Ф_i
         num_sheaf_learners = min(self.layers, self.layers if self.nonlinear else 1)
         for i in range(num_sheaf_learners):
             if self.sparse_learner:
-                self.sheaf_learners.append(LocalConcatSheafLearnerVariant(self.final_d,
-                    self.hidden_channels, out_shape=(self.get_param_size(),), sheaf_act=self.sheaf_act))
+                self.sheaf_learners.append(
+                    LocalConcatSheafLearnerVariant(
+                        self.final_d,
+                        self.hidden_channels,
+                        out_shape=(self.get_param_size(),),
+                        sheaf_act=self.sheaf_act,
+                    )
+                )
             else:
-                self.sheaf_learners.append(LocalConcatSheafLearner(
-                    self.hidden_dim, out_shape=(self.get_param_size(),), sheaf_act=self.sheaf_act))
-            
+                self.sheaf_learners.append(
+                    LocalConcatSheafLearner(
+                        self.hidden_dim,
+                        out_shape=(self.get_param_size(),),
+                        sheaf_act=self.sheaf_act,
+                    )
+                )
+
             if self.use_edge_weights:
                 self.weight_learners.append(EdgeWeightLearner(self.hidden_dim, edge_index))
+
         self.laplacian_builder = lb.NormConnectionLaplacianBuilder(
-            self.graph_size, edge_index, d=self.d, add_hp=self.add_hp,
-            add_lp=self.add_lp, orth_map=self.orth_trans)
+            self.graph_size,
+            edge_index,
+            d=self.d,
+            add_hp=self.add_hp,
+            add_lp=self.add_lp,
+            orth_map=self.orth_trans,
+        )
 
         self.epsilons = nn.ParameterList()
         for i in range(self.layers):
@@ -141,10 +192,11 @@ class DiscreteBundleSheafDiffusion(SheafDiffusion):
         self.lin1 = nn.Linear(self.input_dim, self.hidden_dim)
         if self.second_linear:
             self.lin12 = nn.Linear(self.hidden_dim, self.hidden_dim)
-        self.lin2 = nn.Linear(self.hidden_dim, self.output_dim)
+        self.lin2 = nn.Linear(self.hidden_dim * self.graph_size, self.inter_dim)
+        self.final_lin = nn.Linear(self.inter_dim, self.output_dim)
 
     def get_param_size(self):
-        if self.orth_trans in ['matrix_exp', 'cayley']:
+        if self.orth_trans in ["matrix_exp", "cayley"]:
             return self.d * (self.d + 1) // 2
         else:
             return self.d * (self.d - 1) // 2
@@ -165,7 +217,10 @@ class DiscreteBundleSheafDiffusion(SheafDiffusion):
         for weight_learner in self.weight_learners:
             weight_learner.update_edge_index(edge_index)
 
-    def forward(self, x):
+    def forward(self, data):
+        x = data.x
+
+        # map to hidden_channels * final_d
         x = F.dropout(x, p=self.input_dropout, training=self.training)
         x = self.lin1(x)
         if self.use_act:
@@ -173,21 +228,41 @@ class DiscreteBundleSheafDiffusion(SheafDiffusion):
         x = F.dropout(x, p=self.dropout, training=self.training)
         if self.second_linear:
             x = self.lin12(x)
+
+        # (n, d*f) -> (n*d, f)
         x = x.view(self.graph_size * self.final_d, -1)
 
+        # run "diffusion" for some steps (== num layers)
         x0, L = x, None
         for layer in range(self.layers):
             if layer == 0 or self.nonlinear:
-                x_maps = F.dropout(x, p=self.dropout if layer > 0 else 0., training=self.training)
+                # dropout
+                x_maps = F.dropout(x, p=self.dropout if layer > 0 else 0.0, training=self.training)
+
+                # (nd, f) -> (n, d*f)
                 x_maps = x_maps.reshape(self.graph_size, -1)
+
+                # compute restriction maps
                 maps = self.sheaf_learners[layer](x_maps, self.edge_index)
-                edge_weights = self.weight_learners[layer](x_maps, self.edge_index) if self.use_edge_weights else None
+
+                # compute edge weights
+                edge_weights = (
+                    self.weight_learners[layer](x_maps, self.edge_index)
+                    if self.use_edge_weights
+                    else None
+                )
+
+                # new laplacian and trans_maps
                 L, trans_maps = self.laplacian_builder(maps, edge_weights)
+
+                #
                 self.sheaf_learners[layer].set_L(trans_maps)
 
             x = F.dropout(x, p=self.dropout, training=self.training)
 
-            x = self.left_right_linear(x, self.lin_left_weights[layer], self.lin_right_weights[layer])
+            x = self.left_right_linear(
+                x, self.lin_left_weights[layer], self.lin_right_weights[layer]
+            )
 
             # Use the adjacency matrix rather than the diagonal
             x = torch_sparse.spmm(L[0], L[1], x.size(0), x.size(0), x)
@@ -199,22 +274,31 @@ class DiscreteBundleSheafDiffusion(SheafDiffusion):
             x = x0
 
         x = x.reshape(self.graph_size, -1)
-        x = self.lin2(x)
-        return F.log_softmax(x, dim=1)
+
+        # concat node embeddings
+        x = x.reshape(x.size(0) // self.graph_size, -1)
+
+        # 2-layer clf head
+        x = self.lin2(F.elu(x))
+        x = self.final_lin(F.elu(x))
+
+        # return F.log_softmax(x, dim=1)
+        return x
 
 
 class DiscreteGeneralSheafDiffusion(SheafDiffusion):
-
     def __init__(self, edge_index, args):
         super(DiscreteGeneralSheafDiffusion, self).__init__(edge_index, args)
-        assert args['d'] > 1
+        assert args["d"] > 1
 
         self.lin_right_weights = nn.ModuleList()
         self.lin_left_weights = nn.ModuleList()
 
         if self.right_weights:
             for i in range(self.layers):
-                self.lin_right_weights.append(nn.Linear(self.hidden_channels, self.hidden_channels, bias=False))
+                self.lin_right_weights.append(
+                    nn.Linear(self.hidden_channels, self.hidden_channels, bias=False)
+                )
                 nn.init.orthogonal_(self.lin_right_weights[-1].weight.data)
         if self.left_weights:
             for i in range(self.layers):
@@ -227,14 +311,30 @@ class DiscreteGeneralSheafDiffusion(SheafDiffusion):
         num_sheaf_learners = min(self.layers, self.layers if self.nonlinear else 1)
         for i in range(num_sheaf_learners):
             if self.sparse_learner:
-                self.sheaf_learners.append(LocalConcatSheafLearnerVariant(self.final_d,
-                    self.hidden_channels, out_shape=(self.d, self.d), sheaf_act=self.sheaf_act))
+                self.sheaf_learners.append(
+                    LocalConcatSheafLearnerVariant(
+                        self.final_d,
+                        self.hidden_channels,
+                        out_shape=(self.d, self.d),
+                        sheaf_act=self.sheaf_act,
+                    )
+                )
             else:
-                self.sheaf_learners.append(LocalConcatSheafLearner(
-                    self.hidden_dim, out_shape=(self.d, self.d), sheaf_act=self.sheaf_act))
+                self.sheaf_learners.append(
+                    LocalConcatSheafLearner(
+                        self.hidden_dim, out_shape=(self.d, self.d), sheaf_act=self.sheaf_act
+                    )
+                )
+
         self.laplacian_builder = lb.GeneralLaplacianBuilder(
-            self.graph_size, edge_index, d=self.d, add_lp=self.add_lp, add_hp=self.add_hp,
-            normalised=self.normalised, deg_normalised=self.deg_normalised)
+            self.graph_size,
+            edge_index,
+            d=self.d,
+            add_lp=self.add_lp,
+            add_hp=self.add_hp,
+            normalised=self.normalised,
+            deg_normalised=self.deg_normalised,
+        )
 
         self.epsilons = nn.ParameterList()
         for i in range(self.layers):
@@ -243,7 +343,8 @@ class DiscreteGeneralSheafDiffusion(SheafDiffusion):
         self.lin1 = nn.Linear(self.input_dim, self.hidden_dim)
         if self.second_linear:
             self.lin12 = nn.Linear(self.hidden_dim, self.hidden_dim)
-        self.lin2 = nn.Linear(self.hidden_dim, self.output_dim)
+        self.lin2 = nn.Linear(self.hidden_dim * self.graph_size, self.inter_dim)
+        self.final_lin = nn.Linear(self.inter_dim, self.output_dim)
 
     def left_right_linear(self, x, left, right):
         if self.left_weights:
@@ -256,7 +357,9 @@ class DiscreteGeneralSheafDiffusion(SheafDiffusion):
 
         return x
 
-    def forward(self, x):
+    def forward(self, data):
+        x = data.x
+
         x = F.dropout(x, p=self.input_dropout, training=self.training)
         x = self.lin1(x)
         if self.use_act:
@@ -265,32 +368,55 @@ class DiscreteGeneralSheafDiffusion(SheafDiffusion):
 
         if self.second_linear:
             x = self.lin12(x)
+
+        # (n, d*f) -> (n*d, f)
         x = x.view(self.graph_size * self.final_d, -1)
 
         x0, L = x, None
         for layer in range(self.layers):
             if layer == 0 or self.nonlinear:
-                x_maps = F.dropout(x, p=self.dropout if layer > 0 else 0., training=self.training)
-                maps = self.sheaf_learners[layer](x_maps.reshape(self.graph_size, -1), self.edge_index)
+                # apply dropout per feature channel
+                x_maps = F.dropout(x, p=self.dropout if layer > 0 else 0.0, training=self.training)
+                # compute restriction maps from x
+                maps = self.sheaf_learners[layer](
+                    # x_maps: (n, d*f)
+                    x_maps.reshape(self.graph_size, -1), self.edge_index
+                )
+                # compute laplacian and restriction maps
+                # laplacian is sparse, L = (edge_index, weights)
                 L, trans_maps = self.laplacian_builder(maps)
                 self.sheaf_learners[layer].set_L(trans_maps)
 
             x = F.dropout(x, p=self.dropout, training=self.training)
 
-            x = self.left_right_linear(x, self.lin_left_weights[layer], self.lin_right_weights[layer])
+            # multiply by W_1 and W_2 weight
+            x = self.left_right_linear(
+                x, self.lin_left_weights[layer], self.lin_right_weights[layer]
+            )
 
-            # Use the adjacency matrix rather than the diagonal
+            # sparse multiply X by Laplacian
             x = torch_sparse.spmm(L[0], L[1], x.size(0), x.size(0), x)
 
             if self.use_act:
                 x = F.elu(x)
 
+            # update features
             x0 = (1 + torch.tanh(self.epsilons[layer]).tile(self.graph_size, 1)) * x0 - x
+
+            # store new features as x
             x = x0
 
         # To detect the numerical instabilities of SVD.
         assert torch.all(torch.isfinite(x))
 
         x = x.reshape(self.graph_size, -1)
-        x = self.lin2(x)
-        return F.log_softmax(x, dim=1)
+
+        # concat node embeddings
+        x = x.reshape(x.size(0) // self.graph_size, -1)
+
+        # 2-layer clf head
+        x = self.lin2(F.elu(x))
+        x = self.final_lin(F.elu(x))
+
+        # return F.log_softmax(x, dim=1)
+        return x

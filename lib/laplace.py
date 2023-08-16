@@ -61,7 +61,9 @@ def build_sheaf_laplacian(N, K, edge_index, maps):
     values = torch.tensor(values)
 
     index_t, values_t = torch_sparse.transpose(index, values, E * K, N * K)
-    index, value = torch_sparse.spspmm(index_t, values_t, index, values, N * K, E * K, N * K, coalesced=True)
+    index, value = torch_sparse.spspmm(
+        index_t, values_t, index, values, N * K, E * K, N * K, coalesced=True
+    )
     return torch_sparse.coalesce(index, value, N * K, N * K)
 
 
@@ -122,10 +124,12 @@ def build_norm_sheaf_laplacian(N, K, edge_index, maps, augmented=True):
     D_sqrt_inv_idx = torch.cat(block_diag_indices, dim=1)
     D_sqrt_val = torch.cat(block_diag_values, dim=0)
 
-    tmp_idx, tmp_val = torch_sparse.spspmm(D_sqrt_inv_idx, D_sqrt_val, index, values, N * K, N * K, N * K,
-                                           coalesced=True)
-    index, value = torch_sparse.spspmm(tmp_idx, tmp_val, D_sqrt_inv_idx, D_sqrt_val, N * K, N * K, N * K,
-                                       coalesced=True)
+    tmp_idx, tmp_val = torch_sparse.spspmm(
+        D_sqrt_inv_idx, D_sqrt_val, index, values, N * K, N * K, N * K, coalesced=True
+    )
+    index, value = torch_sparse.spspmm(
+        tmp_idx, tmp_val, D_sqrt_inv_idx, D_sqrt_val, N * K, N * K, N * K, coalesced=True
+    )
     return torch_sparse.coalesce(index, value, N * K, N * K)
 
 
@@ -152,9 +156,9 @@ def build_sheaf_difussion_matrix(N, K, edge_index, maps, augmented=True, return_
     index = torch.cat((L_index, I_index), dim=1)
     value = torch.cat((-L_val, I_val), dim=0)
 
-    P_index, P_val = torch_sparse.coalesce(index, value, N * K, N * K, op='add')
+    P_index, P_val = torch_sparse.coalesce(index, value, N * K, N * K, op="add")
     if return_laplacian:
-        L_index, L_val = torch_sparse.coalesce(L_index, L_val, N * K, N * K, op='add')
+        L_index, L_val = torch_sparse.coalesce(L_index, L_val, N * K, N * K, op="add")
         return (P_index, P_val), (L_index, L_val)
     return P_index, P_val
 
@@ -208,12 +212,13 @@ def compute_incidence_index(edge_index, d):
             index.append([top_x + i, top_y + j])
 
     incidence_index = torch.tensor(index, dtype=torch.long).T
-    assert list(incidence_index.size()) == [2, edge_index.size(1) * (d ** 2)]
+    assert list(incidence_index.size()) == [2, edge_index.size(1) * (d**2)]
     return incidence_index
 
 
-def build_dense_laplacian(size, edge_index, maps, d, normalised=False, diagonal_maps=False, values=None,
-                          edge_weights=None):
+def build_dense_laplacian(
+    size, edge_index, maps, d, normalised=False, diagonal_maps=False, values=None, edge_weights=None
+):
     """Builds a sheaf laplacian from a given graph using naive dense computations (used for testing)."""
     assert edge_index.size(1) % 2 == 0
     if diagonal_maps:
@@ -222,7 +227,7 @@ def build_dense_laplacian(size, edge_index, maps, d, normalised=False, diagonal_
 
     E = edge_index.size(1) // 2
     N = size
-    Delta = torch.zeros(size=(E*d, N*d), dtype=torch.float64)
+    Delta = torch.zeros(size=(E * d, N * d), dtype=torch.float64)
     undirected_edge_idx_dict = get_edge_index_dict(edge_index)
     directed_edge_idx_dict = get_edge_index_dict(edge_index, undirected=False)
 
@@ -238,14 +243,16 @@ def build_dense_laplacian(size, edge_index, maps, d, normalised=False, diagonal_
         orient = -1 if edge_key[0] == source else 1
         if edge_weights is not None:
             factor1_idx, factor2_idx = (
-                directed_edge_idx_dict[(source, target)], directed_edge_idx_dict[(target, source)])
+                directed_edge_idx_dict[(source, target)],
+                directed_edge_idx_dict[(target, source)],
+            )
             assert edge_weights[factor1_idx] == edge_weights[factor2_idx]
             maps[e] = maps[e] * edge_weights[factor1_idx]
         if diagonal_maps:
             diag_idx = torch.arange(0, d)
             Delta[top_x + diag_idx, top_y + diag_idx] = orient * maps[e]
         else:
-            Delta[top_x: top_x+d, top_y: top_y+d] = orient * maps[e]
+            Delta[top_x : top_x + d, top_y : top_y + d] = orient * maps[e]
 
     # Compute non-normalised Laplacian.
     L_dense = Delta.T @ Delta
@@ -258,7 +265,7 @@ def build_dense_laplacian(size, edge_index, maps, d, normalised=False, diagonal_
         return L_dense
 
     # Build normalised Laplacian.
-    D_sqrt_inv = torch.zeros((N*d, N*d), dtype=torch.float64)
+    D_sqrt_inv = torch.zeros((N * d, N * d), dtype=torch.float64)
     for i in range(N):
         low = i * d
         high = low + d
@@ -277,7 +284,9 @@ def append_diag_maps_to_existent_laplacian(size, learnable_d, L, edge_index, val
 
     deg = degree(edge_index[0], num_nodes=size, dtype=L.dtype)
     values = torch.tensor(values, dtype=L.dtype)
-    new_L = torch.zeros((size*(extra_d + learnable_d), size*(extra_d + learnable_d)), dtype=L.dtype)
+    new_L = torch.zeros(
+        (size * (extra_d + learnable_d), size * (extra_d + learnable_d)), dtype=L.dtype
+    )
 
     for idx in range(edge_index.size(1)):
         i, j = edge_index[0][idx], edge_index[1][idx]
@@ -310,20 +319,25 @@ def append_diag_maps_to_existent_laplacian(size, learnable_d, L, edge_index, val
 
 
 def compute_left_right_map_index(edge_index, full_matrix=False):
-    """Computes indices for lower triangular matrix or full matrix"""
-    edge_to_idx = dict()
+    """Computes indices for lower triangular matrix or full matrix
+    left_right_index = map two edges that correspond to the same pair of nodes
+    (we map edge indices in `edge_index`)
+    new_edge_index = corresponding pair of nodes for each edge mapping in `left_right_index`
+    """
+
+    edge_to_idx = dict()  # (node_src, node_trg) -> egde idx
     for e in range(edge_index.size(1)):
         source = edge_index[0, e].item()
         target = edge_index[1, e].item()
         edge_to_idx[(source, target)] = e
 
     left_index, right_index = [], []
-    row, col = [], []
+    row, col = [], []  # source, target
     for e in range(edge_index.size(1)):
         source = edge_index[0, e].item()
         target = edge_index[1, e].item()
         if source < target or full_matrix:
-            left_index.append(e)
+            left_index.append(e)  # edge idx
             right_index.append(edge_to_idx[(target, source)])
 
             row.append(source)
@@ -353,13 +367,13 @@ def compute_learnable_laplacian_indices(size, edge_index, learned_d, total_d):
     row_template = torch.arange(0, learned_d, device=device).view(1, -1, 1).tile(1, 1, learned_d)
     col_template = torch.transpose(row_template, dim0=1, dim1=2)
 
-    non_diag_row_indices = (row_template + total_d*row.reshape(-1, 1, 1)).reshape(1, -1)
-    non_diag_col_indices = (col_template + total_d*col.reshape(-1, 1, 1)).reshape(1, -1)
+    non_diag_row_indices = (row_template + total_d * row.reshape(-1, 1, 1)).reshape(1, -1)
+    non_diag_col_indices = (col_template + total_d * col.reshape(-1, 1, 1)).reshape(1, -1)
     non_diag_indices = torch.cat((non_diag_row_indices, non_diag_col_indices), dim=0)
 
     diag = torch.arange(0, size, device=device)
-    diag_row_indices = (row_template + total_d*diag.reshape(-1, 1, 1)).reshape(1, -1)
-    diag_col_indices = (col_template + total_d*diag.reshape(-1, 1, 1)).reshape(1, -1)
+    diag_row_indices = (row_template + total_d * diag.reshape(-1, 1, 1)).reshape(1, -1)
+    diag_col_indices = (col_template + total_d * diag.reshape(-1, 1, 1)).reshape(1, -1)
     diag_indices = torch.cat((diag_row_indices, diag_col_indices), dim=0)
 
     return diag_indices, non_diag_indices
@@ -372,13 +386,13 @@ def compute_learnable_diag_laplacian_indices(size, edge_index, learned_d, total_
     row_template = torch.arange(0, learned_d, device=device).view(1, -1)
     col_template = row_template.clone()
 
-    non_diag_row_indices = (row_template + total_d*row.unsqueeze(1)).reshape(1, -1)
-    non_diag_col_indices = (col_template + total_d*col.unsqueeze(1)).reshape(1, -1)
+    non_diag_row_indices = (row_template + total_d * row.unsqueeze(1)).reshape(1, -1)
+    non_diag_col_indices = (col_template + total_d * col.unsqueeze(1)).reshape(1, -1)
     non_diag_indices = torch.cat((non_diag_row_indices, non_diag_col_indices), dim=0)
 
     diag = torch.arange(0, size, device=device)
-    diag_row_indices = (row_template + total_d*diag.unsqueeze(1)).reshape(1, -1)
-    diag_col_indices = (col_template + total_d*diag.unsqueeze(1)).reshape(1, -1)
+    diag_row_indices = (row_template + total_d * diag.unsqueeze(1)).reshape(1, -1)
+    diag_col_indices = (col_template + total_d * diag.unsqueeze(1)).reshape(1, -1)
     diag_indices = torch.cat((diag_row_indices, diag_col_indices), dim=0)
 
     return diag_indices, non_diag_indices
@@ -391,13 +405,13 @@ def compute_fixed_diag_laplacian_indices(size, edge_index, learned_d, total_d):
     row_template = torch.arange(learned_d, total_d, device=device).view(1, -1)
     col_template = row_template.clone()
 
-    non_diag_row_indices = (row_template + total_d*row.unsqueeze(1)).reshape(1, -1)
-    non_diag_col_indices = (col_template + total_d*col.unsqueeze(1)).reshape(1, -1)
+    non_diag_row_indices = (row_template + total_d * row.unsqueeze(1)).reshape(1, -1)
+    non_diag_col_indices = (col_template + total_d * col.unsqueeze(1)).reshape(1, -1)
     non_diag_indices = torch.cat((non_diag_row_indices, non_diag_col_indices), dim=0)
 
     diag = torch.arange(0, size, device=device)
-    diag_row_indices = (row_template + total_d*diag.unsqueeze(1)).reshape(1, -1)
-    diag_col_indices = (col_template + total_d*diag.unsqueeze(1)).reshape(1, -1)
+    diag_row_indices = (row_template + total_d * diag.unsqueeze(1)).reshape(1, -1)
+    diag_col_indices = (col_template + total_d * diag.unsqueeze(1)).reshape(1, -1)
     diag_indices = torch.cat((diag_row_indices, diag_col_indices), dim=0)
 
     return diag_indices, non_diag_indices
@@ -419,6 +433,7 @@ def batched_sym_matrix_pow(matrices: torch.Tensor, p: float) -> torch.Tensor:
     good = vals > vals.max(-1, True).values * vals.size(-1) * torch.finfo(vals.dtype).eps
     vals = vals.pow(p).where(good, torch.zeros((), device=matrices.device, dtype=matrices.dtype))
     matrix_power = (vecs * vals.unsqueeze(-2)) @ torch.transpose(vecs, -2, -1)
+
     return matrix_power
 
 
@@ -479,5 +494,3 @@ def get_1d_oracle_maps(edge_index, y):
         else:
             maps[i] = -1.0
     return maps.view(-1, 1)
-
-
